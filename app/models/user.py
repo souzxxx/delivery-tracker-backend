@@ -1,5 +1,6 @@
 from enum import Enum
 from sqlalchemy import Column, Integer, String
+from sqlalchemy.orm import relationship
 from app.database import Base
 
 
@@ -16,3 +17,6 @@ class User(Base):
     hashed_password = Column(String, nullable=False)
     full_name = Column(String, nullable=True)
     role = Column(String, default=UserRole.USER.value, nullable=False)
+    
+    # Relacionamento com pedidos
+    orders = relationship("Order", back_populates="owner")
