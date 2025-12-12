@@ -13,15 +13,27 @@ class TrackingAddressPublic(BaseModel):
         from_attributes = True
 
 
+class TrackingEvent(BaseModel):
+    """Evento de tracking para timeline"""
+    status: OrderStatus
+    status_label: str
+    description: str | None = None
+    created_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
 class TrackingResponse(BaseModel):
-    """Resposta pública de rastreio"""
+    """Resposta pública de rastreio com timeline"""
     tracking_code: str
     status: OrderStatus
+    status_label: str
     origin: TrackingAddressPublic
     destination: TrackingAddressPublic
+    events: list[TrackingEvent]
     created_at: datetime
     updated_at: datetime
 
     class Config:
         from_attributes = True
-

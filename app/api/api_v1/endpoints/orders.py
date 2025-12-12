@@ -5,6 +5,7 @@ from sqlalchemy.orm import Session
 from app.models.user import User
 from app.models.address import Address
 from app.models.order import Order, OrderStatus
+from app.models.order_event import OrderEvent, STATUS_LABELS
 from app.schemas.order_schema import (
     OrderCreate,
     OrderResponse,
@@ -23,6 +24,23 @@ router = APIRouter()
 def generate_tracking_code() -> str:
     """Gera um código de rastreio único"""
     return f"DT-{uuid.uuid4().hex[:8].upper()}"
+
+
+def create_order_event(
+    db: Session,
+    order_id: int,
+    new_status: str,
+    description: str | None = None,
+) -> OrderEvent:
+    """Cria um evento de tracking para o pedido"""
+    event = OrderEvent(
+        order_id=order_id,
+        status=new_status,
+        status_label=STATUS_LABELS.get(new_status, new_status),
+        description=description,
+    )
+    db.add(event)
+    return event
 
 
 async def create_address_from_cep(
@@ -99,6 +117,16 @@ async def create_order(
         destination_address_id=destination.id,
     )
     db.add(order)
+    db.flush()  # Para obter o ID do pedido
+    
+    # Cria evento inicial de tracking
+    create_order_event(
+        db=db,
+        order_id=order.id,
+        new_status=OrderStatus.CREATED.value,
+        description="Pedido registrado no sistema",
+    )
+    
     db.commit()
     db.refresh(order)
     
@@ -145,6 +173,14 @@ def get_order(
     return order
 
 
+# Descrições padrão para cada transição de status
+STATUS_DESCRIPTIONS = {
+    "in_transit": "Pedido coletado e saiu para entrega",
+    "delivered": "Pedido entregue com sucesso",
+    "canceled": "Pedido cancelado",
+}
+
+
 @router.patch("/{order_id}/status", response_model=OrderResponse)
 def update_order_status(
     order_id: int,
@@ -152,7 +188,7 @@ def update_order_status(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """Atualiza o status de um pedido"""
+    """Atualiza o status de um pedido e registra evento na timeline"""
     order = db.query(Order).filter(Order.id == order_id).first()
     
     if not order:
@@ -179,7 +215,17 @@ def update_order_status(
             detail=f"Não é possível alterar um pedido com status '{current_status}'.",
         )
     
+    # Atualiza o status
     order.status = new_status
+    
+    # Cria evento de tracking
+    create_order_event(
+        db=db,
+        order_id=order.id,
+        new_status=new_status,
+        description=STATUS_DESCRIPTIONS.get(new_status),
+    )
+    
     db.commit()
     db.refresh(order)
     

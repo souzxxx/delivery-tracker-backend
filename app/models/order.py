@@ -30,6 +30,9 @@ class Order(Base):
     origin_address = relationship("Address", foreign_keys=[origin_address_id])
     destination_address = relationship("Address", foreign_keys=[destination_address_id])
     
+    # Relacionamento com eventos de tracking (timeline)
+    events = relationship("OrderEvent", back_populates="order", order_by="OrderEvent.created_at.desc()")
+    
     # Timestamps
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
