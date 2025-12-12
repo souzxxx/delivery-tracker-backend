@@ -1,6 +1,7 @@
 import uuid
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
+from sqlalchemy.exc import SQLAlchemyError
 
 from app.models.user import User
 from app.models.address import Address
@@ -14,9 +15,10 @@ from app.schemas.order_schema import (
 )
 from app.schemas.address_schema import AddressCreateByCEP
 from app.services.db_service import get_db
-from app.services.auth_service import get_current_user
-from app.services.viacep_service import fetch_address_by_cep
-from app.services.geocoding_service import geocode_address, geocode_by_cep
+from app.services.auth_service import get_current_user, get_current_admin
+from app.models.user import UserRole
+from app.services.viacep_service import fetch_address_by_cep, AddressFromCEP
+from app.services.geocoding_service import geocode_address, geocode_by_cep, Coordinates
 
 router = APIRouter()
 
@@ -43,12 +45,13 @@ def create_order_event(
     return event
 
 
-async def create_address_from_cep(
+async def fetch_address_data(
     address_data: AddressCreateByCEP,
-    db: Session,
-) -> Address:
-    """Cria um endereço buscando dados do CEP via ViaCEP e coordenadas via Nominatim"""
-    
+) -> tuple[AddressFromCEP, Coordinates | None]:
+    """
+    Busca dados do endereço via APIs externas (ViaCEP + Nominatim).
+    Faz isso ANTES de qualquer operação no banco para evitar dados órfãos.
+    """
     # Busca dados do CEP
     cep_data = await fetch_address_by_cep(address_data.cep)
     
@@ -72,19 +75,27 @@ async def create_address_from_cep(
     if not coords:
         coords = await geocode_by_cep(address_data.cep)
     
-    # Cria o endereço com dados do ViaCEP + coordenadas (se disponíveis)
+    return cep_data, coords
+
+
+def create_address_from_data(
+    db: Session,
+    address_input: AddressCreateByCEP,
+    cep_data: AddressFromCEP,
+    coords: Coordinates | None,
+) -> Address:
+    """Cria o Address no banco a partir dos dados já buscados"""
     address = Address(
         cep=cep_data.cep,
-        street=street,
-        number=address_data.number,
-        complement=address_data.complement,
+        street=cep_data.street or "Endereço não informado",
+        number=address_input.number,
+        complement=address_input.complement,
         city=cep_data.city,
         state=cep_data.state,
         latitude=coords.latitude if coords else None,
         longitude=coords.longitude if coords else None,
     )
     db.add(address)
-    
     return address
 
 
@@ -101,36 +112,53 @@ async def create_order(
     Você só precisa informar: cep, number e complement (opcional).
     """
     
-    # Cria endereços buscando dados via ViaCEP
-    origin = await create_address_from_cep(order_data.origin_address, db)
-    destination = await create_address_from_cep(order_data.destination_address, db)
+    # 1️⃣ Busca dados externos ANTES de tocar no banco
+    # Se falhar aqui, não há nada para rollback
+    origin_cep_data, origin_coords = await fetch_address_data(order_data.origin_address)
+    dest_cep_data, dest_coords = await fetch_address_data(order_data.destination_address)
     
-    # Flush para obter os IDs dos endereços
-    db.flush()
-    
-    # Cria o pedido
-    order = Order(
-        tracking_code=generate_tracking_code(),
-        status=OrderStatus.CREATED.value,
-        owner_id=current_user.id,
-        origin_address_id=origin.id,
-        destination_address_id=destination.id,
-    )
-    db.add(order)
-    db.flush()  # Para obter o ID do pedido
-    
-    # Cria evento inicial de tracking
-    create_order_event(
-        db=db,
-        order_id=order.id,
-        new_status=OrderStatus.CREATED.value,
-        description="Pedido registrado no sistema",
-    )
-    
-    db.commit()
-    db.refresh(order)
-    
-    return order
+    # 2️⃣ Transação atômica: tudo ou nada
+    try:
+        # Cria endereços
+        origin = create_address_from_data(
+            db, order_data.origin_address, origin_cep_data, origin_coords
+        )
+        destination = create_address_from_data(
+            db, order_data.destination_address, dest_cep_data, dest_coords
+        )
+        
+        db.flush()  # Obtém IDs dos endereços
+        
+        # Cria o pedido
+        order = Order(
+            tracking_code=generate_tracking_code(),
+            status=OrderStatus.CREATED.value,
+            owner_id=current_user.id,
+            origin_address_id=origin.id,
+            destination_address_id=destination.id,
+        )
+        db.add(order)
+        db.flush()  # Obtém ID do pedido
+        
+        # Cria evento inicial de tracking
+        create_order_event(
+            db=db,
+            order_id=order.id,
+            new_status=OrderStatus.CREATED.value,
+            description="Pedido registrado no sistema",
+        )
+        
+        db.commit()
+        db.refresh(order)
+        
+        return order
+        
+    except SQLAlchemyError:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Erro ao criar pedido. Tente novamente.",
+        )
 
 
 @router.get("/", response_model=list[OrderListResponse])
@@ -148,13 +176,33 @@ def list_my_orders(
     return orders
 
 
+@router.get("/all", response_model=list[OrderListResponse])
+def list_all_orders(
+    status_filter: str | None = None,
+    db: Session = Depends(get_db),
+    admin: User = Depends(get_current_admin),
+):
+    """
+    🔐 ADMIN ONLY — Lista TODOS os pedidos do sistema.
+    
+    Filtros opcionais:
+    - status_filter: created, in_transit, delivered, canceled
+    """
+    query = db.query(Order)
+    
+    if status_filter:
+        query = query.filter(Order.status == status_filter)
+    
+    return query.order_by(Order.created_at.desc()).all()
+
+
 @router.get("/{order_id}", response_model=OrderResponse)
 def get_order(
     order_id: int,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """Retorna detalhes de um pedido específico"""
+    """Retorna detalhes de um pedido específico (dono ou admin)"""
     order = db.query(Order).filter(Order.id == order_id).first()
     
     if not order:
@@ -163,8 +211,11 @@ def get_order(
             detail="Pedido não encontrado.",
         )
     
-    # Verifica se o pedido pertence ao usuário
-    if order.owner_id != current_user.id:
+    # Admin pode ver qualquer pedido, usuário só os seus
+    is_admin = current_user.role == UserRole.ADMIN.value
+    is_owner = order.owner_id == current_user.id
+    
+    if not is_admin and not is_owner:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Você não tem permissão para acessar este pedido.",
@@ -188,7 +239,7 @@ def update_order_status(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """Atualiza o status de um pedido e registra evento na timeline"""
+    """Atualiza o status de um pedido e registra evento na timeline (dono ou admin)"""
     order = db.query(Order).filter(Order.id == order_id).first()
     
     if not order:
@@ -197,8 +248,11 @@ def update_order_status(
             detail="Pedido não encontrado.",
         )
     
-    # Verifica se o pedido pertence ao usuário
-    if order.owner_id != current_user.id:
+    # Admin pode atualizar qualquer pedido, usuário só os seus
+    is_admin = current_user.role == UserRole.ADMIN.value
+    is_owner = order.owner_id == current_user.id
+    
+    if not is_admin and not is_owner:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Você não tem permissão para modificar este pedido.",
@@ -215,18 +269,25 @@ def update_order_status(
             detail=f"Não é possível alterar um pedido com status '{current_status}'.",
         )
     
-    # Atualiza o status
-    order.status = new_status
-    
-    # Cria evento de tracking
-    create_order_event(
-        db=db,
-        order_id=order.id,
-        new_status=new_status,
-        description=STATUS_DESCRIPTIONS.get(new_status),
-    )
-    
-    db.commit()
-    db.refresh(order)
-    
-    return order
+    # Transação atômica
+    try:
+        order.status = new_status
+        
+        create_order_event(
+            db=db,
+            order_id=order.id,
+            new_status=new_status,
+            description=STATUS_DESCRIPTIONS.get(new_status),
+        )
+        
+        db.commit()
+        db.refresh(order)
+        
+        return order
+        
+    except SQLAlchemyError:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Erro ao atualizar status. Tente novamente.",
+        )
