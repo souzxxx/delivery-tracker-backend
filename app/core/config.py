@@ -1,19 +1,23 @@
-from pydantic_settings import BaseSettings
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
 
 class Settings(BaseSettings):
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        env_file_encoding="utf-8",
+        case_sensitive=True,
+    )
+
     PROJECT_NAME: str = "Delivery Tracker API"
     API_V1_STR: str = "/api/v1"
 
-    DATABASE_URL: str = (
-        "postgresql+psycopg2://delivery_user:delivery_password@localhost:5432/delivery_db"
-    )
+    # 🗄️ Banco de dados
+    DATABASE_URL: str
 
     # 🔐 Configs de segurança
-    SECRET_KEY: str = "muda-essa-string-para-uma-bem-grande-e-secreta"
+    SECRET_KEY: str
     ALGORITHM: str = "HS256"
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 60  # 1h
 
-    class Config:
-        case_sensitive = True
 
 settings = Settings()
