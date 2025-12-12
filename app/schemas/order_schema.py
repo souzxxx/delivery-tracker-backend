@@ -1,8 +1,8 @@
 from datetime import datetime
 from enum import Enum
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 
-from app.schemas.address_schema import AddressCreate, AddressResponse
+from app.schemas.address_schema import AddressCreateByCEP, AddressResponse
 
 
 class OrderStatus(str, Enum):
@@ -13,8 +13,9 @@ class OrderStatus(str, Enum):
 
 
 class OrderCreate(BaseModel):
-    origin_address: AddressCreate
-    destination_address: AddressCreate
+    """Cria pedido com endereços simplificados (CEP + número + complemento)"""
+    origin_address: AddressCreateByCEP
+    destination_address: AddressCreateByCEP
 
 
 class OrderStatusUpdate(BaseModel):

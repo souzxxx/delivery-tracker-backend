@@ -11,7 +11,15 @@ class AddressBase(BaseModel):
 
 
 class AddressCreate(AddressBase):
+    """Criação de endereço com todos os campos (manual)"""
     pass
+
+
+class AddressCreateByCEP(BaseModel):
+    """Criação de endereço simplificada - preenche via ViaCEP"""
+    cep: str = Field(..., min_length=8, max_length=9, examples=["01310-100"])
+    number: str = Field(..., max_length=20, examples=["1000"])
+    complement: str | None = Field(None, max_length=100, examples=["Apto 101"])
 
 
 class AddressResponse(AddressBase):

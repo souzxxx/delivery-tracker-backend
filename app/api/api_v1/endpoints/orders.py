@@ -11,8 +11,11 @@ from app.schemas.order_schema import (
     OrderListResponse,
     OrderStatusUpdate,
 )
+from app.schemas.address_schema import AddressCreateByCEP
 from app.services.db_service import get_db
 from app.services.auth_service import get_current_user
+from app.services.viacep_service import fetch_address_by_cep
+from app.services.geocoding_service import geocode_address, geocode_by_cep
 
 router = APIRouter()
 
@@ -22,35 +25,67 @@ def generate_tracking_code() -> str:
     return f"DT-{uuid.uuid4().hex[:8].upper()}"
 
 
+async def create_address_from_cep(
+    address_data: AddressCreateByCEP,
+    db: Session,
+) -> Address:
+    """Cria um endereço buscando dados do CEP via ViaCEP e coordenadas via Nominatim"""
+    
+    # Busca dados do CEP
+    cep_data = await fetch_address_by_cep(address_data.cep)
+    
+    if not cep_data:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"CEP '{address_data.cep}' não encontrado ou inválido.",
+        )
+    
+    street = cep_data.street or "Endereço não informado"
+    
+    # Tenta buscar coordenadas (não bloqueia se falhar)
+    coords = await geocode_address(
+        street=street,
+        number=address_data.number,
+        city=cep_data.city,
+        state=cep_data.state,
+    )
+    
+    # Fallback: tenta geocoding só pelo CEP
+    if not coords:
+        coords = await geocode_by_cep(address_data.cep)
+    
+    # Cria o endereço com dados do ViaCEP + coordenadas (se disponíveis)
+    address = Address(
+        cep=cep_data.cep,
+        street=street,
+        number=address_data.number,
+        complement=address_data.complement,
+        city=cep_data.city,
+        state=cep_data.state,
+        latitude=coords.latitude if coords else None,
+        longitude=coords.longitude if coords else None,
+    )
+    db.add(address)
+    
+    return address
+
+
 @router.post("/", response_model=OrderResponse, status_code=status.HTTP_201_CREATED)
-def create_order(
+async def create_order(
     order_data: OrderCreate,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """Cria um novo pedido com endereços de origem e destino"""
+    """
+    Cria um novo pedido com endereços de origem e destino.
     
-    # Cria endereço de origem
-    origin = Address(
-        cep=order_data.origin_address.cep,
-        street=order_data.origin_address.street,
-        number=order_data.origin_address.number,
-        complement=order_data.origin_address.complement,
-        city=order_data.origin_address.city,
-        state=order_data.origin_address.state,
-    )
-    db.add(origin)
+    Os campos street, city e state são preenchidos automaticamente via ViaCEP.
+    Você só precisa informar: cep, number e complement (opcional).
+    """
     
-    # Cria endereço de destino
-    destination = Address(
-        cep=order_data.destination_address.cep,
-        street=order_data.destination_address.street,
-        number=order_data.destination_address.number,
-        complement=order_data.destination_address.complement,
-        city=order_data.destination_address.city,
-        state=order_data.destination_address.state,
-    )
-    db.add(destination)
+    # Cria endereços buscando dados via ViaCEP
+    origin = await create_address_from_cep(order_data.origin_address, db)
+    destination = await create_address_from_cep(order_data.destination_address, db)
     
     # Flush para obter os IDs dos endereços
     db.flush()
@@ -149,4 +184,3 @@ def update_order_status(
     db.refresh(order)
     
     return order
-
