@@ -22,6 +22,21 @@ from app.services.geocoding_service import geocode_address, geocode_by_cep, Coor
 
 router = APIRouter()
 
+# --- NOVO ENDPOINT ADICIONADO ---
+@router.get("/cep/{cep}", response_model=AddressFromCEP)
+async def get_address_preview(cep: str):
+    """
+    Endpoint auxiliar para buscar endereço pelo CEP.
+    Usado no frontend para auto-complete.
+    """
+    address = await fetch_address_by_cep(cep)
+    if not address:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, 
+            detail="CEP não encontrado"
+        )
+    return address
+# --------------------------------
 
 def generate_tracking_code() -> str:
     """Gera um código de rastreio único"""
